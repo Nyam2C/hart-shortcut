@@ -258,6 +258,28 @@ class SimpleMLPAdaLN(nn.Module):
             x = block(x, y)
         o = self.final_layer(x, y)
         return o
+    
+    def forward2(self, x, t, c):
+        x = self.input_proj(x)
+        t = self.time_embed(t)
+        c = self.cond_embed(c)
+
+        y = t + c
+        
+        dt_flow = int(math.log2(128))
+        batch_size = x.size(0)            # x는 (B, C, H, W) 형태의 텐서
+        device     = x.device             # GPU/CPU 장치 정보
+        dt_base    = torch.full(
+            (batch_size,),
+            dt_flow,
+            dtype=torch.int32,
+            device=device
+        )
+        v = helper_inference.call_model(train_state, x, y, dt_base, c)
+        delta_t = 1.0 / 128
+        x1pred = x + v * (1-t)
+        x = x1pred * (t+delta_t) + eps * (1-t-delta_t)
+        return x
 
     def forward_with_cfg(self, x, t, c, cfg_scale):
         half = x[: len(x) // 2]
@@ -268,6 +290,8 @@ class SimpleMLPAdaLN(nn.Module):
         half_eps = cond_eps * (1 + cfg_scale) - cfg_scale * uncond_eps
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
+    
+    from functools import partial
 
     def forward_with_dpmsolver(self, x, timestep, c):
         model_output = self.forward(x, timestep, c)
