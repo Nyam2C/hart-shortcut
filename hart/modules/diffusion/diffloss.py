@@ -7,7 +7,7 @@ import math
 
 import torch
 import torch.nn as nn
-
+from utils.checkpoint import Checkpoint
 from hart.modules.diffusion import create_diffusion
 
 
@@ -275,6 +275,16 @@ class SimpleMLPAdaLN(nn.Module):
             dtype=torch.int32,
             device=device
         )
+        cp = Checkpoint(FLAGS.load_dir)
+        replace_dict = cp.load_as_dict()['train_state']
+        del replace_dict['opt_state'] # Debug
+        train_state = train_state.replace(**replace_dict)
+        @torch.jit.script
+        def identity_tensor(x: torch.Tensor) -> torch.Tensor:
+            return x
+
+        # Àû¿ë
+        train_state = identity_tensor(train_state)
         v = helper_inference.call_model(train_state, x, y, dt_base, c)
         delta_t = 1.0 / 128
         x1pred = x + v * (1-t)
