@@ -7,7 +7,8 @@ import math
 
 import torch
 import torch.nn as nn
-from utils.checkpoint import Checkpoint
+from hart.modules.diffusion.utils.checkpoint import Checkpoint
+from hart.modules.diffusion.utils.train_state import TrainStateEma
 from hart.modules.diffusion import create_diffusion
 
 
@@ -258,6 +259,7 @@ class SimpleMLPAdaLN(nn.Module):
             x = block(x, y)
         o = self.final_layer(x, y)
         return o
+    from functools import partial
     
     def forward2(self, x, t, c):
         x = self.input_proj(x)
@@ -267,34 +269,36 @@ class SimpleMLPAdaLN(nn.Module):
         y = t + c
         
         dt_flow = int(math.log2(128))
-        batch_size = x.size(0)            # x´Â (B, C, H, W) ÇüÅÂÀÇ ÅÙ¼­
-        device     = x.device             # GPU/CPU ÀåÄ¡ Á¤º¸
+        batch_size = x.size(0)            # xï¿½ï¿½ (B, C, H, W) ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½Ù¼ï¿½
+        device     = x.device             # GPU/CPU ï¿½ï¿½Ä¡ ï¿½ï¿½ï¿½ï¿½
         dt_base    = torch.full(
             (batch_size,),
             dt_flow,
             dtype=torch.int32,
             device=device
         )
-        cp = Checkpoint(FLAGS.load_dir)
+
+        
+        def call_model(train_state, images, t, dt, labels, use_ema=True):
+            call_fn = train_state.call_model_ema
+            output = call_fn(images, t, dt, labels, train=False)
+            return output
+        cp = Checkpoint("/content/hart/checkpoints/celeba-shortcut2-every4400001")
         replace_dict = cp.load_as_dict()['train_state']
         del replace_dict['opt_state'] # Debug
         train_state = train_state.replace(**replace_dict)
-        @torch.jit.script
-        def identity_tensor(x: torch.Tensor) -> torch.Tensor:
-            return x
+        train_state = train_state.replace(step=0)
 
-        # Àû¿ë
-        train_state = identity_tensor(train_state)
-        v = helper_inference.call_model(train_state, x, y, dt_base, c)
+        v = call_model(train_state, x, y, dt_base, c)
         delta_t = 1.0 / 128
         x1pred = x + v * (1-t)
-        x = x1pred * (t+delta_t) + eps * (1-t-delta_t)
+        x = x1pred * (t+delta_t) * (1-t-delta_t)
         return x
 
     def forward_with_cfg(self, x, t, c, cfg_scale):
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, c)
+        model_out = self.forward2(combined, t, c)
         eps, rest = model_out[:, : self.in_channels], model_out[:, self.in_channels :]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = cond_eps * (1 + cfg_scale) - cfg_scale * uncond_eps

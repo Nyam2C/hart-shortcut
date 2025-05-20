@@ -167,3 +167,5 @@ wandb/
 wandb/*
 
 __pycache__/
+
+checkpoints

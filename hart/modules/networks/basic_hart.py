@@ -7,7 +7,7 @@ import functools
 import math
 from typing import Tuple, Union
 
-import hart_backend.fused_kernels
+from hart.kernels.csrc.rms_norm import rms_norm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -498,7 +498,7 @@ class LlamaRMSNormFused(nn.Module):
             else torch.empty_like(x)
         )
         self.weight.data = self.weight.data.to(x)
-        hart_backend.fused_kernels.rms_norm(
+        rms_norm(
             out, x, self.weight.data, self.variance_epsilon, self.use_quant
         )
         return out
