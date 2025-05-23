@@ -103,9 +103,7 @@ class HARTForT2I(PreTrainedModel):
         self.sep_aln_pooling_mode = sep_aln_pooling_mode = config.sep_aln_pooling_mode
         self.use_cross_attn = use_cross_attn = config.use_cross_attn
 
-        self.diffusion_head_repeats = diffusion_head_repeats = (
-            config.diffusion_head_repeats
-        )
+
         # MAR variant masking ratio, a left-half truncated Gaussian centered at 100% masking ratio with std 0.25
         mask_ratio_min = 0.5
         self.mask_ratio_generator = stats.truncnorm(
@@ -326,6 +324,7 @@ class HARTForT2I(PreTrainedModel):
         """
         # num_maskgit_iters = 1
         # final_stage = 2
+
         if g_seed is None:
             rng = None
         else:
@@ -518,11 +517,11 @@ class HARTForT2I(PreTrainedModel):
                 tokens[mask_to_pred] = (h_BChw + h_BChw_diff).reshape(-1, self.Cvae)
             else:
                 tokens[mask_to_pred] = h_BChw.reshape(-1, self.Cvae)
+            
         h_BChw_final = tokens.transpose(1, 2).reshape(
             B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1]
         )
         f_hat += h_BChw_final
-
         ################ last stage maskgit ################
 
         for b in self.blocks:

@@ -7,8 +7,8 @@ import math
 
 import torch
 import torch.nn as nn
-from hart.modules.diffusion.utils.checkpoint import Checkpoint
-from hart.modules.diffusion.utils.train_state import TrainStateEma
+from utils.checkpoint import Checkpoint
+from utils.train_state import TrainStateEma
 from hart.modules.diffusion import create_diffusion
 
 
@@ -298,7 +298,7 @@ class SimpleMLPAdaLN(nn.Module):
     def forward_with_cfg(self, x, t, c, cfg_scale):
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward2(combined, t, c)
+        model_out = self.forward(combined, t, c)
         eps, rest = model_out[:, : self.in_channels], model_out[:, self.in_channels :]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = cond_eps * (1 + cfg_scale) - cfg_scale * uncond_eps
