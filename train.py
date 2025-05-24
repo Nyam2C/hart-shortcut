@@ -122,26 +122,8 @@ def main(_):
         get_fid_activations = None
         truth_fid_stats = None
 
-    ###################################
-    # Creating Model and put on devices.
-    ###################################
     FLAGS.model.image_channels = example_obs_shape[-1]
     FLAGS.model.image_size = example_obs_shape[1]
-    dit_args = {
-        'patch_size': FLAGS.model['patch_size'],
-        'hidden_size': FLAGS.model['hidden_size'],
-        'depth': FLAGS.model['depth'],
-        'num_heads': FLAGS.model['num_heads'],
-        'mlp_ratio': FLAGS.model['mlp_ratio'],
-        'out_channels': example_obs_shape[-1],
-        'class_dropout_prob': FLAGS.model['class_dropout_prob'],
-        'num_classes': FLAGS.model['num_classes'],
-        'dropout': FLAGS.model['dropout'],
-        'ignore_dt': False if (FLAGS.model['train_type'] in ('shortcut', 'livereflow')) else True,
-    }
-    model_def = DiT(**dit_args)
-    tabulate_fn = flax.linen.tabulate(model_def, jax.random.PRNGKey(0))
-    print(tabulate_fn(example_obs, jnp.zeros((1,)), jnp.zeros((1,)), jnp.zeros((1,), dtype=jnp.int32)))
 
     if FLAGS.model.use_cosine:
         lr_schedule = optax.warmup_cosine_decay_schedule(0.0, FLAGS.model['lr'], FLAGS.model['warmup'], FLAGS.max_steps)
@@ -186,85 +168,11 @@ def main(_):
         jax.debug.visualize_array_sharding(train_state.params['FinalLayer_0']['Dense_0']['kernel'])
         del cp
 
-    if FLAGS.model.train_type == 'progressive' or FLAGS.model.train_type == 'consistency-distillation':
-        train_state_teacher = jax.jit(lambda x : x, out_shardings=train_state_sharding)(train_state)
-    else:
-        train_state_teacher = None
-
     visualize_labels = example_labels
     visualize_labels = shard_data(visualize_labels)
     visualize_labels = jax.experimental.multihost_utils.process_allgather(visualize_labels)
     imagenet_labels = open('data/imagenet_labels.txt').read().splitlines()
 
-    ###################################
-    # Update Function
-    ###################################
-
-    @partial(jax.jit, out_shardings=(train_state_sharding, no_shard))
-    def update(train_state, train_state_teacher, images, labels, force_t=-1, force_dt=-1):
-        new_rng, targets_key, dropout_key, perm_key = jax.random.split(train_state.rng, 4)
-        info = {}
-
-        id_perm = jax.random.permutation(perm_key, images.shape[0])
-        images = images[id_perm]
-        labels = labels[id_perm]
-        images = jax.lax.with_sharding_constraint(images, data_sharding)
-        labels = jax.lax.with_sharding_constraint(labels, data_sharding)
-
-        if FLAGS.model['cfg_scale'] == 0: # For unconditional generation.
-            labels = jnp.ones(labels.shape[0], dtype=jnp.int32) * FLAGS.model['num_classes']
-
-        if FLAGS.model['train_type'] == 'naive':
-            from baselines.targets_naive import get_targets
-            x_t, v_t, t, dt_base, labels, info = get_targets(FLAGS, targets_key, train_state, images, labels, force_t, force_dt)
-        elif FLAGS.model['train_type'] == 'shortcut':
-            from targets_shortcut import get_targets
-            x_t, v_t, t, dt_base, labels, info = get_targets(FLAGS, targets_key, train_state, images, labels, force_t, force_dt)
-        elif FLAGS.model['train_type'] == 'progressive':
-            from baselines.targets_progressive import get_targets
-            x_t, v_t, t, dt_base, labels, info = get_targets(FLAGS, targets_key, train_state, train_state_teacher, images, labels, force_t, force_dt)
-        elif FLAGS.model['train_type'] == 'consistency-distillation':
-            from baselines.targets_consistency_distillation import get_targets
-            x_t, v_t, t, dt_base, labels, info = get_targets(FLAGS, targets_key, train_state, train_state_teacher, images, labels, force_t, force_dt)
-        elif FLAGS.model['train_type'] == 'consistency':
-            from baselines.targets_consistency_training import get_targets
-            x_t, v_t, t, dt_base, labels, info = get_targets(FLAGS, targets_key, train_state, images, labels, force_t, force_dt)
-        elif FLAGS.model['train_type'] == 'livereflow':
-            from baselines.targets_livereflow import get_targets
-            x_t, v_t, t, dt_base, labels, info = get_targets(FLAGS, targets_key, train_state, images, labels, force_t, force_dt)
-
-        def loss_fn(grad_params):
-            v_prime, logvars, activations = train_state.call_model(x_t, t, dt_base, labels, train=True, rngs={'dropout': dropout_key}, params=grad_params, return_activations=True)
-            mse_v = jnp.mean((v_prime - v_t) ** 2, axis=(1, 2, 3))
-            loss = jnp.mean(mse_v)
-
-            info = {
-                'loss': loss,
-                'v_magnitude_prime': jnp.sqrt(jnp.mean(jnp.square(v_prime))),
-                **{'activations/' + k : jnp.sqrt(jnp.mean(jnp.square(v))) for k, v in activations.items()},
-            }
-
-            if FLAGS.model['train_type'] == 'shortcut' or FLAGS.model['train_type'] == 'livereflow':
-                bootstrap_size = FLAGS.batch_size // FLAGS.model['bootstrap_every']
-                info['loss_flow'] = jnp.mean(mse_v[bootstrap_size:])
-                info['loss_bootstrap'] = jnp.mean(mse_v[:bootstrap_size])
-            
-            return loss, info
-        
-        grads, new_info = jax.grad(loss_fn, has_aux=True)(train_state.params)
-        info = {**info, **new_info}
-        updates, new_opt_state = train_state.tx.update(grads, train_state.opt_state, train_state.params)
-        new_params = optax.apply_updates(train_state.params, updates)
-
-        info['grad_norm'] = optax.global_norm(grads)
-        info['update_norm'] = optax.global_norm(updates)
-        info['param_norm'] = optax.global_norm(new_params)
-        info['lr'] = lr_schedule(train_state.step)
-
-        train_state = train_state.replace(rng=new_rng, step=train_state.step + 1, params=new_params, opt_state=new_opt_state)
-        train_state = train_state.update_ema(FLAGS.model['target_update_rate'])
-        return train_state, info
-    
     if FLAGS.mode != 'train':
         print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
         print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
@@ -276,64 +184,10 @@ def main(_):
         print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
         print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
         print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")        
-        do_inference(FLAGS, train_state, None, dataset, dataset_valid, shard_data, vae_encode, vae_decode, update,
+        do_inference(FLAGS, train_state, None, dataset, dataset_valid, shard_data, vae_encode, vae_decode,
                        get_fid_activations, imagenet_labels, visualize_labels, 
                        fid_from_stats, truth_fid_stats)
         return
-
-    ###################################
-    # Train Loop
-    ###################################
-
-    for i in tqdm.tqdm(range(1 + start_step, FLAGS.max_steps + 1 + start_step),
-                       smoothing=0.1,
-                       dynamic_ncols=True):
-        
-        # Sample data.
-        if not FLAGS.debug_overfit or i == 1:
-            batch_images, batch_labels = shard_data(*next(dataset))
-            if FLAGS.model.use_stable_vae and 'latent' not in FLAGS.dataset_name:
-                vae_rng, vae_key = jax.random.split(vae_rng)
-                batch_images = vae_encode(vae_key, batch_images)
-
-        # Train update.
-        train_state, update_info = update(train_state, train_state_teacher, batch_images, batch_labels)
-
-        if i % FLAGS.log_interval == 0 or i == 1:
-            update_info = jax.device_get(update_info)
-            update_info = jax.tree_map(lambda x: np.array(x), update_info)
-            update_info = jax.tree_map(lambda x: x.mean(), update_info)
-            train_metrics = {f'training/{k}': v for k, v in update_info.items()}
-
-            valid_images, valid_labels = shard_data(*next(dataset_valid))
-            if FLAGS.model.use_stable_vae and 'latent' not in FLAGS.dataset_name:
-                valid_images = vae_encode(vae_rng, valid_images)
-            _, valid_update_info = update(train_state, train_state_teacher, valid_images, valid_labels)
-            valid_update_info = jax.device_get(valid_update_info)
-            valid_update_info = jax.tree_map(lambda x: x.mean(), valid_update_info)
-            train_metrics['training/loss_valid'] = valid_update_info['loss']
-
-            if jax.process_index() == 0:
-                wandb.log(train_metrics, step=i)
-
-        if FLAGS.model['train_type'] == 'progressive':
-            num_sections = np.log2(FLAGS.model['denoise_timesteps']).astype(jnp.int32)
-            if i % (FLAGS.max_steps // num_sections) == 0:
-                train_state_teacher = jax.jit(lambda x : x, out_shardings=train_state_sharding)(train_state)
-
-        if i % FLAGS.eval_interval == 0:
-            eval_model(FLAGS, train_state, train_state_teacher, i, dataset, dataset_valid, shard_data, vae_encode, vae_decode, update,
-                       get_fid_activations, imagenet_labels, visualize_labels, 
-                       fid_from_stats, truth_fid_stats)
-
-        if i % FLAGS.save_interval == 0 and FLAGS.save_dir is not None:
-            train_state_gather = jax.experimental.multihost_utils.process_allgather(train_state)
-            if jax.process_index() == 0:
-                cp = Checkpoint(FLAGS.save_dir+str(train_state_gather.step+1), parallel=False)
-                cp.train_state = train_state_gather
-                cp.save()
-                del cp
-            del train_state_gather
 
 if __name__ == '__main__':
     app.run(main)
