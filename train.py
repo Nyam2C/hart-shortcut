@@ -23,10 +23,8 @@ from helper_eval import eval_model
 from helper_inference import do_inference
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string('dataset_name', 'imagenet256', 'Environment name.')
 flags.DEFINE_string('load_dir','/content/shortcut-models/celeba-shortcut2-every4400001', 'Logging dir (if not None, save params).')
 flags.DEFINE_string('save_dir', None, 'Logging dir (if not None, save params).')
-flags.DEFINE_string('fid_stats', '/content/shortcut-models/imagenet256_fidstats_ours.npz', 'FID stats file.')
 flags.DEFINE_integer('seed', 10, 'Random seed.') # Must be the same across all processes.
 flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 20000, 'Eval interval.')
@@ -46,7 +44,7 @@ model_config = ml_collections.ConfigDict({
     'dropout': 0.0,
     'hidden_size': 768, # change this!
     'patch_size': 2, # change this!
-    'depth': 2, # change this!
+    'depth': 3, # change this!
     'num_heads': 2, # change this!
     'mlp_ratio': 4, # change this!
     'class_dropout_prob': 0.1,
@@ -76,9 +74,6 @@ wandb_config.update({
 config_flags.DEFINE_config_dict('wandb', wandb_config, lock_config=False)
 config_flags.DEFINE_config_dict('model', model_config, lock_config=False)
     
-##############################################
-## Training Code.
-##############################################
 def main(_):
 
     np.random.seed(FLAGS.seed)
@@ -92,39 +87,22 @@ def main(_):
     print("Node Batch: ", local_batch_size)
     print("Device Batch:", local_batch_size // device_count)
 
-    # Create wandb logger
-    if jax.process_index() == 0 and FLAGS.mode == 'train':
-        setup_wandb(FLAGS.model.to_dict(), **FLAGS.wandb)
-        
-    dataset = get_dataset(FLAGS.dataset_name, local_batch_size, False, FLAGS.debug_overfit)
-    dataset_valid = get_dataset(FLAGS.dataset_name, local_batch_size, False, FLAGS.debug_overfit)
-    example_obs, example_labels = next(dataset)
-    example_obs = example_obs[:1]
-    example_obs_shape = example_obs.shape
-
-    if FLAGS.model.use_stable_vae:
-        vae = StableVAE.create()
-        if 'latent' in FLAGS.dataset_name:
-            example_obs = example_obs[:, :, :, example_obs.shape[-1] // 2:]
-            example_obs_shape = example_obs.shape
-        else:
-            example_obs = vae.encode(jax.random.PRNGKey(0), example_obs)
-        example_obs_shape = example_obs.shape
-        vae_rng = jax.random.PRNGKey(42)
-        vae_encode = jax.jit(vae.encode)
-        vae_decode = jax.jit(vae.decode)
-
-    if FLAGS.fid_stats is not None:
-        from utils.fid import get_fid_network, fid_from_stats
-        get_fid_activations = get_fid_network() 
-        truth_fid_stats = np.load(FLAGS.fid_stats)
-    else:
-        get_fid_activations = None
-        truth_fid_stats = None
-
-    FLAGS.model.image_channels = example_obs_shape[-1]
-    FLAGS.model.image_size = example_obs_shape[1]
-
+    FLAGS.model.image_channels = 4
+    FLAGS.model.image_size = 32
+    dit_args = {
+        'patch_size': FLAGS.model['patch_size'],
+        'hidden_size': FLAGS.model['hidden_size'],
+        'depth': FLAGS.model['depth'],
+        'num_heads': FLAGS.model['num_heads'],
+        'mlp_ratio': FLAGS.model['mlp_ratio'],
+        'out_channels': 4,
+        'class_dropout_prob': FLAGS.model['class_dropout_prob'],
+        'num_classes': FLAGS.model['num_classes'],
+        'dropout': FLAGS.model['dropout'],
+        'ignore_dt': False if (FLAGS.model['train_type'] in ('shortcut', 'livereflow')) else True,
+    }
+    model_def = DiT(**dit_args)
+    tabulate_fn = flax.linen.tabulate(model_def, jax.random.PRNGKey(0))
     if FLAGS.model.use_cosine:
         lr_schedule = optax.warmup_cosine_decay_schedule(0.0, FLAGS.model['lr'], FLAGS.model['warmup'], FLAGS.max_steps)
     elif FLAGS.model.warmup > 0:
@@ -139,7 +117,7 @@ def main(_):
         example_t = jnp.zeros((1,))
         example_dt = jnp.zeros((1,))
         example_label = jnp.zeros((1,), dtype=jnp.int32)
-        example_obs = jnp.zeros(example_obs_shape)
+        example_obs = jnp.zeros((1, 32, 32, 4))
         model_rngs = {'params': param_key, 'label_dropout': dropout_key, 'dropout': dropout2_key}
         params = model_def.init(model_rngs, example_obs, example_t, example_dt, example_label)['params']
         opt_state = tx.init(params)
@@ -150,8 +128,6 @@ def main(_):
 
     data_sharding, train_state_sharding, no_shard, shard_data, global_to_local = create_sharding(FLAGS.model.sharding, train_state_shape)
     train_state = jax.jit(init, out_shardings=train_state_sharding)(rng)
-    jax.debug.visualize_array_sharding(train_state.params['FinalLayer_0']['Dense_0']['kernel'])
-    jax.debug.visualize_array_sharding(train_state.params['TimestepEmbedder_1']['Dense_0']['kernel'])
     jax.experimental.multihost_utils.assert_equal(train_state.params['TimestepEmbedder_1']['Dense_0']['kernel'])
     start_step = 1
 
@@ -165,28 +141,10 @@ def main(_):
         train_state = jax.jit(lambda x : x, out_shardings=train_state_sharding)(train_state)
         print("Loaded model with step", train_state.step)
         train_state = train_state.replace(step=0)
-        jax.debug.visualize_array_sharding(train_state.params['FinalLayer_0']['Dense_0']['kernel'])
         del cp
-
-    visualize_labels = example_labels
-    visualize_labels = shard_data(visualize_labels)
-    visualize_labels = jax.experimental.multihost_utils.process_allgather(visualize_labels)
-    imagenet_labels = open('data/imagenet_labels.txt').read().splitlines()
-
+        
     if FLAGS.mode != 'train':
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")        
-        do_inference(FLAGS, train_state, None, dataset, dataset_valid, shard_data, vae_encode, vae_decode,
-                       get_fid_activations, imagenet_labels, visualize_labels, 
-                       fid_from_stats, truth_fid_stats)
+        do_inference(FLAGS, train_state, shard_data)
         return
 
 if __name__ == '__main__':
