@@ -55,3 +55,4 @@ def do_inference(
           eps = shard_data(jax.random.normal(jax.random.fold_in(eps_key, ti), images_shape))
           x1pred = x + v * (1-t)
           x = x1pred * (t+delta_t) + eps * (1-t-delta_t)
+        print("eeeeeeeeennnnnnnnnnnnnndddddddddddddddddd")

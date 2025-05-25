@@ -18,7 +18,7 @@ from jax._src.nn.initializers import _compute_fans
 def xavier_uniform_pytorchlike():
     def init(key, shape, dtype):
         dtype = dtypes.canonicalize_dtype(dtype)
-        named_shape = core.as_named_shape(shape)
+        named_shape = shape
         if len(shape) == 2: # Dense, [in, out]
             fan_in = shape[0]
             fan_out = shape[1]

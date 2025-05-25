@@ -15,7 +15,6 @@ import ml_collections
 from utils.wandb import setup_wandb, default_wandb_config
 from utils.train_state import TrainStateEma
 from utils.checkpoint import Checkpoint
-from utils.stable_vae import StableVAE
 from utils.sharding import create_sharding, all_gather
 from utils.datasets import get_dataset
 from model import DiT
@@ -23,7 +22,7 @@ from helper_eval import eval_model
 from helper_inference import do_inference
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string('load_dir','/content/shortcut-models/celeba-shortcut2-every4400001', 'Logging dir (if not None, save params).')
+flags.DEFINE_string('load_dir','/content/hart/celeba-shortcut2-every4400001', 'Logging dir (if not None, save params).')
 flags.DEFINE_string('save_dir', None, 'Logging dir (if not None, save params).')
 flags.DEFINE_integer('seed', 10, 'Random seed.') # Must be the same across all processes.
 flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')

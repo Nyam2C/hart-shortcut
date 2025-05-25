@@ -169,3 +169,4 @@ wandb/*
 __pycache__/
 
 checkpoints
+celeba-shortcut2-every4400001

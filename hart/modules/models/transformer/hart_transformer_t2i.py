@@ -267,16 +267,6 @@ class HARTForT2I(PreTrainedModel):
         self.decoder_norm = norm_layer(self.C)
         # self.diffusion_pos_embed_learned = nn.Parameter(torch.zeros(1, self.last_level_pns, self.C))
 
-        self.diffloss = DiffLoss(
-            target_channels=self.Cvae,
-            z_channels=self.C,
-            width=config.diff_width,
-            depth=config.diff_depth,
-            num_sampling_steps=config.num_sampling_steps,
-            sampler=config.sampler,
-        )
-        self.diffusion_batch_mul = config.diffusion_batch_mul
-
     def get_logits(
         self,
         h_or_h_and_residual: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
@@ -493,30 +483,6 @@ class HARTForT2I(PreTrainedModel):
                 h_BChw = gumbel_softmax_with_rng(
                     logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng
                 ) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
-            if final_stage == 0:
-                # sample with diffusion model
-                last_stage_discrete_cond = self.vae_quant_proxy[0].embedding(idx_Bl)
-                last_stage_discrete_cond = self.word_embed(last_stage_discrete_cond)
-                last_stage_discrete_cond = torch.cat(
-                    [last_stage_discrete_cond, last_stage_discrete_cond], dim=0
-                )
-                last_stage_cond = self.decoder_norm(
-                    last_layer_cond + last_stage_discrete_cond
-                )
-                bs, cur_seq_len, _ = last_stage_cond.shape
-                ##### begin baseline sampling #####
-                last_stage_cond = last_stage_cond.reshape(bs * cur_seq_len, -1)
-                h_BChw_diff = self.diffloss.sample(
-                    z=last_stage_cond, temperature=1.0, cfg=t
-                )
-                ##### end baseline sampling #####
-                h_BChw_diff = h_BChw_diff.reshape(bs, cur_seq_len, -1)
-                # [B, L, Cvae]
-                h_BChw_diff, _ = h_BChw_diff.chunk(2, dim=0)
-                # update feature map
-                tokens[mask_to_pred] = (h_BChw + h_BChw_diff).reshape(-1, self.Cvae)
-            else:
-                tokens[mask_to_pred] = h_BChw.reshape(-1, self.Cvae)
             
         h_BChw_final = tokens.transpose(1, 2).reshape(
             B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1]
