@@ -90,6 +90,9 @@ class HARTForT2I(PreTrainedModel):
             config.flash_if_available,
             config.fused_if_available,
         )
+        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+        print(patch_nums)
+        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
         self.mlp_type = mlp_type = config.mlp_type
         self.attn_type = attn_type = config.attn_type
         if self.attn_type == "gpt2":
@@ -508,18 +511,16 @@ class HARTForT2I(PreTrainedModel):
                 h_BChw_diff = self.diffloss.sample(
                     z=last_stage_cond, temperature=1.0, cfg=t
                 )
+                print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+                print(self.Cvae)
+                print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
                 ##### end baseline sampling #####
                 h_BChw_diff = h_BChw_diff.reshape(bs, cur_seq_len, -1)
                 # [B, L, Cvae]
                 h_BChw_diff, _ = h_BChw_diff.chunk(2, dim=0)
-                torch.set_printoptions(profile="full", linewidth=2000)  
-                np.set_printoptions(threshold=int(1e9), linewidth=2000)
-                print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-                print(h_BChw)
-                print(h_BChw_diff)
-                print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+                print("dtypes:", tokens.dtype, h_BChw.dtype, h_BChw_diff.dtype)
                 # update feature map
-                tokens[mask_to_pred] = (h_BChw + h_BChw_diff).reshape(-1, self.Cvae)
+                tokens[mask_to_pred] = (h_BChw + h_BChw_diff).reshape(-1, self.Cvae).float()
             else:
                 tokens[mask_to_pred] = h_BChw.reshape(-1, self.Cvae)
             

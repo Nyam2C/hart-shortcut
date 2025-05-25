@@ -229,9 +229,13 @@ class DiT(nn.Module):
     out_channels: int
     class_dropout_prob: float
     num_classes: int
+    kernel_init: Callable[[Any, Sequence[int], Any], jnp.ndarray] = nn.initializers.xavier_uniform()
+    bias_init:  Callable[[Any, Sequence[int], Any], jnp.ndarray] = nn.initializers.zeros
+    kernel_size: Tuple[int,int] = (1,1)
     ignore_dt: bool = False
     dropout: float = 0.0
     dtype: Dtype = jnp.bfloat16
+
 
     @nn.compact
     def __call__(self, x, t, dt, y, train=False, return_activations=False):
@@ -285,7 +289,7 @@ class DiT(nn.Module):
 
         t_discrete = jnp.floor(t * 256).astype(jnp.int32)
         logvars = nn.Embed(256, 1, embedding_init=nn.initializers.constant(0))(t_discrete) * 100
-
+        
         if return_activations:
             return x, logvars, activations
         return x

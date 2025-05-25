@@ -109,7 +109,8 @@ class DiffLoss(nn.Module):
         print("Per-device batch:", local_batch)
 
         # mixed-precision settings
-        self.dtype = jnp.bfloat16
+        self.dtype = jnp.float32
+
         self.dynamic_scaler = DynamicScale()
 
         # build model with remat (activation checkpointing)
@@ -162,7 +163,7 @@ class DiffLoss(nn.Module):
         def init_fn(rng):
             param_key, dropout_key, dropout2_key = jax.random.split(rng, 3)
             example = {
-                'obs': jnp.zeros((1, 32, 32, z_channels), dtype=self.dtype),
+                'obs': jnp.zeros((1, 32, 32, 4), dtype=self.dtype),
                 't': jnp.zeros((1,), dtype=self.dtype),
                 'dt': jnp.zeros((1,), dtype=self.dtype),
                 'label': jnp.zeros((1,), dtype=jnp.int32),
@@ -263,11 +264,25 @@ class DiffLoss(nn.Module):
             x = x1pred * (t+delta_t) + eps * (1-t-delta_t)
         x_np = np.array(x)
         x_torch = torch.from_numpy(x_np)
-        x_torch = x_torch.permute(0, 3, 1, 2).contiguous()
         device = torch.device("cuda")
-        x_torch = x_torch.to(device, dtype=torch.float16)
+        x_torch = x_torch.to(device, dtype=torch.float32)
         x_torch = x_torch.permute(0, 3, 1, 2).contiguous()
-        return x_torch
+        conv1x1 = nn.Conv2d(
+            in_channels=4,
+            out_channels=32,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True
+        ).to(x_torch.device, dtype=torch.float32)
+
+        # 2) x_torch에 적용
+        x32 = conv1x1(x_torch)  # -> (B, 32, H, W)
+
+        # 3) 만약 다시 (B, H, W, 32) 형태로 쓰고 싶다면
+        x32 = x32.permute(0, 2, 3, 1).contiguous()  # -> (B, H, W, 32)
+
+        return x32
 
 
 def modulate(x, shift, scale):
