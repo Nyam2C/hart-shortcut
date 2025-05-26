@@ -507,13 +507,9 @@ class HARTForT2I(PreTrainedModel):
                 )
                 bs, cur_seq_len, _ = last_stage_cond.shape
                 ##### begin baseline sampling #####
-                last_stage_cond = last_stage_cond.reshape(bs * cur_seq_len, -1)
                 h_BChw_diff = self.diffloss.sample(
                     z=last_stage_cond, temperature=1.0, cfg=t
                 )
-                print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-                print(self.Cvae)
-                print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
                 ##### end baseline sampling #####
                 h_BChw_diff = h_BChw_diff.reshape(bs, cur_seq_len, -1)
                 # [B, L, Cvae]

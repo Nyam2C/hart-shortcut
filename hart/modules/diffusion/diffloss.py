@@ -12,7 +12,7 @@ import jax
 import jax.experimental
 import matplotlib.pyplot as plt
 import os
-
+import math
 import jax.numpy as jnp
 import flax
 import optax
@@ -38,7 +38,7 @@ from utils.train_state import TrainStateEma
 from hart.modules.diffusion import create_diffusion
 
 model_config = ml_collections.ConfigDict({
-    'lr': 0.0001,
+    'lr': 0.0003,
     'beta1': 0.9,
     'beta2': 0.999,
     'weight_decay': 0.1,
@@ -75,7 +75,7 @@ wandb_config.update({
 import os
 
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
-os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.5'
+os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.9'
 
 class DiffLoss(nn.Module):
     def __init__(
@@ -90,6 +90,13 @@ class DiffLoss(nn.Module):
         super().__init__()
         self.in_channels = 4 #수정해야할지도?
         self.micro_batch = 32
+        self.net = SimpleMLPAdaLN(
+            in_channels=target_channels,
+            model_channels=width,
+            out_channels=target_channels * 2,
+            z_channels=z_channels,
+            num_res_blocks=depth,
+        )
         # reproducibility & devices
         np.random.seed(10)
         print("Using devices", jax.local_devices())
@@ -193,6 +200,11 @@ class DiffLoss(nn.Module):
         self.train_state = jax.jit(init_fn, out_shardings=train_state_sharding)(rng)
         self.shared_data = shard_data
 
+        self.proj_w = jax.random.normal(
+            jax.random.PRNGKey(0),
+            (32, 4)
+        ) * jnp.sqrt(2 / (32 + 4))
+
         # load checkpoint (without optimizer state)
         cp = Checkpoint('/content/hart/celeba-shortcut2-every4400001')
         ckpt = cp.load_as_dict()['train_state']
@@ -223,50 +235,50 @@ class DiffLoss(nn.Module):
 
     def sample(self, z, temperature=1.0, cfg=1.5, sampler=None):
         # diffusion loss sampling
-        if not cfg == 1.0:
-            noise = torch.randn(z.shape[0] // 2, self.in_channels).cuda()
-            noise = torch.cat([noise, noise], dim=0)
-            model_kwargs = dict(c=z, cfg_scale=cfg)
-        else:
-            noise = torch.randn(z.shape[0], self.in_channels).cuda()
-            model_kwargs = dict(c=z)
+        device = torch.device("cuda")
+        bs, L, _ = z.shape
+        num_patches_side = int(math.sqrt(L))
+        assert num_patches_side**2 == L
+        x = torch.randn(z.shape[0], num_patches_side, num_patches_side, self.in_channels).cuda()
+        x_np = x.cpu().numpy()
+        x_jax = jnp.array(x_np)
+        x_jax = self.shared_data(x_jax)
+        labels_uncond = self.shared_data(jnp.full((bs,), model_config['num_classes'], dtype=jnp.int32))
+        print(labels_uncond)
         with jax.spmd_mode('allow_all'):
             global_device_count = jax.device_count()
             key = jax.random.PRNGKey(42 + jax.process_index())
-            labels_uncond = self.shared_data(jnp.ones((32,), dtype=jnp.int32) * model_config['num_classes']) # Null token
-            eps = jax.random.normal(key, (32,32,32,4))
+            eps = jax.random.normal(key, x_jax.shape)
 
             @partial(jax.jit, static_argnums=(5,))
             def call_model(train_state, images, t, dt, labels, use_ema=True):
                 call_fn = train_state.call_model
                 output = call_fn(images, t, dt, labels, train=False)
                 return output
-            denoise_timesteps = 1
-            cfg_scale = 1.0
-            x0 = []
-            images_shape = (32,32,32,4)
             key = jax.random.PRNGKey(42)
             key = jax.random.fold_in(key, 1)
             key = jax.random.fold_in(key, jax.process_index())
             eps_key, label_key = jax.random.split(key)
-            x = jax.random.normal(eps_key, images_shape)
-            x = self.shared_data(x)
-            x0.append(np.array(jax.experimental.multihost_utils.process_allgather(x)))
-            delta_t = 1.0 / denoise_timesteps
-            t = 1
-            t_vector = jnp.full((images_shape[0], ), t)
-            dt_flow = np.log2(denoise_timesteps).astype(jnp.int32)
-            dt_base = jnp.ones(images_shape[0], dtype=jnp.int32) * dt_flow
-            t_vector, dt_base = self.shared_data(t_vector, dt_base)
-            v = call_model(self.train_state, x, t_vector, dt_base, labels_uncond)
-            eps = self.shared_data(jax.random.normal(jax.random.fold_in(eps_key, 1), images_shape))
-            x1pred = x + v * (1-t)
-            x = x1pred * (t+delta_t) + eps * (1-t-delta_t)
+            denoise_timesteps = 5
+            images_shape = (8,64,64,4)
+            for ti in range(denoise_timesteps):
+                eps = self.shared_data(jax.random.normal(jax.random.fold_in(eps_key, ti), images_shape))
+                x = x_jax
+                delta_t = 1.0 / denoise_timesteps
+                t = ti / denoise_timesteps
+                t_vector = jnp.full((bs,), t)
+                dt_flow = np.log2(denoise_timesteps).astype(jnp.int32)
+                dt_base = jnp.zeros((bs,), dtype=jnp.int32) * dt_flow
+                t_vector, dt_base = self.shared_data(t_vector, dt_base)
+                v = call_model(self.train_state, x, t_vector, dt_base, labels_uncond)
+                x1pred = x + v * (1-t)
+                x = x1pred * (t+delta_t) + eps * (1-t-delta_t)
+
         x_np = np.array(x)
         x_torch = torch.from_numpy(x_np)
-        device = torch.device("cuda")
         x_torch = x_torch.to(device, dtype=torch.float32)
         x_torch = x_torch.permute(0, 3, 1, 2).contiguous()
+        
         conv1x1 = nn.Conv2d(
             in_channels=4,
             out_channels=32,
@@ -278,13 +290,10 @@ class DiffLoss(nn.Module):
 
         # 2) x_torch에 적용
         x32 = conv1x1(x_torch)  # -> (B, 32, H, W)
-
         # 3) 만약 다시 (B, H, W, 32) 형태로 쓰고 싶다면
-        x32 = x32.permute(0, 2, 3, 1).contiguous()  # -> (B, H, W, 32)
+        x32 = x32.permute(0, 2, 3, 1).contiguous()  # -> (B, H, W, 32)\
 
         return x32
-
-
 def modulate(x, shift, scale):
     return x * (1 + scale) + shift
 

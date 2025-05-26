@@ -212,6 +212,7 @@ class FinalLayer(nn.Module):
         shift, scale = jnp.split(c, 2, axis=-1)
         x = nn.LayerNorm(use_bias=False, use_scale=False, dtype=self.tc.dtype)(x)
         x = modulate(x, shift, scale)
+        print(self.out_channels)
         x = nn.Dense(self.patch_size * self.patch_size * self.out_channels, 
                      kernel_init=self.tc.kern_init('final', zero=True), 
                      bias_init=self.tc.kern_init('final_bias', zero=True), dtype=self.tc.dtype)(x)
